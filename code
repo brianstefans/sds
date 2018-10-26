@@ -1,0 +1,98 @@
+library(text2vec)
+library(tidytext)
+library(tidyverse)
+library(magrittr)
+library(tm)
+library(quanteda)
+library(irlba)
+#Reading the data
+train <- read_delim("../input/Devex_train (1).csv",",")
+test <- read_delim("../input/Devex_test_questions.csv",",")
+
+#EDA
+length(which(!complete.cases(train)))
+train <- train[,1:10]
+train$Type <- as.factor(train$Type)
+
+table(train$Type)
+prop.table(table(train$Type))
+
+
+#trimming 
+sds.codes <- as.data.frame(unique(train$`Label 1`))
+
+for(i in 4:ncol(train)){
+  for(k in 1:nrow(train)){
+    train[k,i]<- strtrim(train[k,i],5)}
+}
+
+#gathering
+train <- gather(train, key = "Label",value = "sds.goal",4:10)
+
+#cleaning the data set
+text.clean <- function(x){
+  x <- tokens(x, what = "word",
+              remove_numbers = T, remove_punct = T,
+              remove_symbols = T,remove_hyphens = T)
+  x <- tokens_tolower(x)
+  x <- tokens_select(x,stopwords(),selection = "remove")
+  x <- tokens_wordstem(x,language = "english")
+}
+train.tokens<- text.clean(train$Text)
+train.tokens <- dfm(train.tokens)
+train.tokens.df <- as.matrix(train.tokens)
+#train.tokens.dfm <- cbind(sds.code = train$sds.goal,train.tokens.df)
+#train.tokens.dfm <- gather(train.tokens.dfm, key = "Label",value = sds.goal,21694:21700)
+
+#tf.idf- normalizing the document 
+#tf-idf
+term.freq <- function(row){
+  row/sum(row)
+}
+
+#inverse document frequency
+inverse.doc.freq <- function(col){
+  corpus.size <- length(col)
+  #no of rows where col is not empty 
+  doc.count <- length(which(col>0))
+  
+  log10(corpus.size/doc.count)
+}
+
+tf.idf <- function(tf,idf){
+  tf * idf
+}
+
+#normalize all documents
+train.tokens.tf <- apply(train.tokens.df,1,term.freq)
+train.tokens.idf <- apply(train.tokens.df,2,inverse.doc.freq)
+train.tokens.tidf <- apply(train.tokens.tf,2,tf.idf,idf=train.tokens.tidf)
+
+#transposing it back from a term freq to a dfm
+train.tokens.tidf <- t(train.tokens.tidf)
+dim(train.tokens.tidf)
+
+#check for incomplete cases and fixing them 
+incomplete.cases <- which(!complete.cases(train.tokens.tidf))
+train$Text[incomplete.cases]
+
+train.tokens.tidf[incomplete.cases,] <-rep(0.0,ncol(train.tokens.tidf))
+
+#getting the singula value decomposition 
+train.svd <- irlba(train.tokens.tidf, nv=300,maxit=600)
+
+sigma.inverse <- 1 / train.svd$d
+u.transpose <- t(train.svd)
+document <- train.tokens.tidf[1,]
+document.hat <- sigma.inverse * u.transpose %*% document
+
+train.svd <- data.frame(cbind(sds.codes = train$sds.goals,train.svd$v ))
+
+#running the model with random forest
+#cross validation 
+cv.folds <- createMultiFolds(train.tokens.dfm$cuisine, k=4, times = 3)
+cv.cntrl <- trainControl(method = "repeatedcv" , number = 4, repeats = 3,
+                         index= cv.folds)
+rf.cv <- train(sds.codes~.,data=train.svd,method = "rf",
+trControl = cv.cntrl, tuneLength = 7)
+rf.cv
